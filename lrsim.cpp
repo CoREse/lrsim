@@ -5,13 +5,27 @@
 #include <assert.h>
 #include <random>
 #include <stdio.h>
+#include <sstream>
 using namespace std;
 
 const char Bases[4]={'A', 'T', 'G', 'C'};
+int RegionSize=300;
+double RegionFloatVariance=0.05;
+int BlockSize=100;
+double BlockFloatVariance=0.05;
+double ReadFloatVariance=0.05;
+double MaximumError=0.4;
+double MinError=0.01;
+string RunHash;
 
-string simRead(string & RefSeq, double ErrorRate, int Start, int Length, int Min, int Max, mt19937 & Generator)
+string simRead(string & RefSeq, double ErrorRate, int Start, int Length, int Min, int Max, vector<double> & RefRegionErrorFloat, mt19937 & Generator)
 {
     int Ins=22, Del=49, Sub=0;
+    if (ReadFloatVariance!=0.0)
+    {
+        normal_distribution<double> ReadErrorFloatDist(0,ReadFloatVariance);
+        ErrorRate+=ReadErrorFloatDist(Generator);
+    }
     int All=Ins+Del+Sub;
     int InsT=Ins;
     int DelT=Ins+Del;
@@ -22,9 +36,17 @@ string simRead(string & RefSeq, double ErrorRate, int Start, int Length, int Min
     uniform_int_distribution<int> BaseDist(0,3);
     uniform_int_distribution<int> TypeDist(0,All-1);
     uniform_real_distribution<double> ErrorDist;
-    while (i< End)
+    int BlockI=-1;
+    normal_distribution<double> BlockFloatDist(0,BlockFloatVariance);
+    double BlockFloat=0;
+    while (i < End)
     {
-        if (ErrorDist(Generator)<ErrorRate)
+        if (BlockI!=(i-Start)/BlockSize)
+        {
+            BlockI=(i-Start)/BlockSize;
+            BlockFloat=BlockFloatDist(Generator);
+        }
+        if (ErrorDist(Generator)<max(min(MaximumError,ErrorRate+RefRegionErrorFloat[i/RegionSize]+BlockFloat),MinError))
         {
             int TypeI=TypeDist(Generator);
             if (TypeI<InsT)
@@ -54,7 +76,7 @@ void outputReads(int SN, vector<string> & Reads, string & Quals)
     int i=SN-Reads.size();
     for (int j=0;j<Reads.size();++j)
     {
-        fprintf(stdout, "@Simulated_%d\n%s\n+\n%s\n",i,Reads[j].c_str(),Quals.substr(0,Reads[j].length()).c_str());
+        fprintf(stdout, "@Simulated_%s_%d\n%s\n+\n%s\n",RunHash.c_str(),i,Reads[j].c_str(),Quals.substr(0,Reads[j].length()).c_str());
         ++i;
     }
 }
@@ -71,15 +93,15 @@ int getRefInd(vector<unsigned long long> & RefAccL, unsigned long long &Position
     }
 }
 
-void runSim(vector<string> & Ref, vector<string> & RefNames, unsigned long long TotalLength, vector<unsigned long long> & RefAccL, unsigned long long NumberOfBases, mt19937 & Generator, int DSize=0, unsigned * DistLengths=nullptr, unsigned * DistFormers=nullptr)
+void runSim(vector<string> & Ref, vector<string> & RefNames, unsigned long long TotalLength, vector<unsigned long long> & RefAccL, double ErrorRate, unsigned long long NumberOfBases, vector<vector<double>> &RegionErrorFloat, mt19937 & Generator, int DSize=0, unsigned * DistLengths=nullptr, unsigned * DistFormers=nullptr)
 {
     fprintf(stderr,"Generating reads...Ref length: %d, TotalBases=%llu\n",TotalLength, NumberOfBases);
     double Mean=8000;
     double Variance=7000;
     int Min=1;
-    int Max=100000;
+    int Max=1000000;
     string Quals="";
-    for (int i=0;i<Max;++i) Quals+='!';
+    for (int i=0;i<Max;++i) Quals+='!'-int(10.0*log10(ErrorRate));
     unsigned long long BN=0;
     int SN=0;
     vector<string> Reads;
@@ -104,7 +126,7 @@ void runSim(vector<string> & Ref, vector<string> & RefNames, unsigned long long 
             double LV=LVariance(Generator);
             Length=int (((double)Length)*LV);
         }
-        string Read=simRead(Ref[RefIndex], 0.15, Pos, Length, Min, Max, Generator);
+        string Read=simRead(Ref[RefIndex], ErrorRate, Pos, Length, Min, Max, RegionErrorFloat[RefIndex], Generator);
         if (Read.length()==0) continue;
         BN+=Read.length();
         SN+=1;
@@ -118,7 +140,7 @@ void runSim(vector<string> & Ref, vector<string> & RefNames, unsigned long long 
     outputReads(SN,Reads,Quals);
 }
 
-void sim(vector<const char *> &RefFileNames, double Depth, string DistFileName, mt19937 & Generator, int ThreadN)
+void sim(vector<const char *> &RefFileNames, double ErrorRate, double Depth, string BasesString, string DistFileName, mt19937 & Generator, int ThreadN)
 {
     vector<string> RefNames;
     vector<string> Ref;
@@ -143,6 +165,16 @@ void sim(vector<const char *> &RefFileNames, double Depth, string DistFileName, 
         }
         fai_destroy(RefFile);
     }
+    vector<vector<double>> RegionErrorFloat;
+    normal_distribution<double> RegionFloatDist(0,RegionFloatVariance);
+    for (int i=0;i<Ref.size();++i)
+    {
+        RegionErrorFloat.push_back(vector<double>());
+        for (int j=0;j<Ref[i].size()/RegionSize+1;++j)
+        {
+            RegionErrorFloat[i].push_back(RegionFloatDist(Generator));
+        }
+    }
     unsigned * DistLengths=nullptr;
     unsigned * DistFormers=nullptr;
     unsigned DSize=0;
@@ -157,27 +189,55 @@ void sim(vector<const char *> &RefFileNames, double Depth, string DistFileName, 
         fread(DistFormers,4,DSize,df);
         fprintf(stderr,"Dist file read, size:%u\n", DSize, DistLengths[0]);
     }
-    runSim(Ref, RefNames, TotalLength, RefAccL, (unsigned long long) (double(TotalLength)*Depth), Generator, DSize, DistLengths, DistFormers);
+    unsigned long long NBases=0;
+    if (BasesString=="")
+    {
+        NBases=(unsigned long long) (double(TotalLength)*Depth);
+    }
+    else
+    {
+        if ((BasesString[BasesString.length()-1]&char(0b11011111))=='M') NBases=(unsigned long long)(((double)atof(BasesString.substr(0,BasesString.length()-1).c_str()))*1000000.0);
+        else if ((BasesString[BasesString.length()-1]&char(0b11011111))=='K') NBases=(unsigned long long)(((double)atof(BasesString.substr(0,BasesString.length()-1).c_str()))*1000.0);
+        else if ((BasesString[BasesString.length()-1]&char(0b11011111))=='G') NBases=(unsigned long long)(((double)atof(BasesString.substr(0,BasesString.length()-1).c_str()))*1000000000.0);
+        else NBases=(unsigned long long)((double)atof(BasesString.substr(0,BasesString.length()-1).c_str()));
+    }
+    runSim(Ref, RefNames, TotalLength, RefAccL, ErrorRate, NBases, RegionErrorFloat, Generator, DSize, DistLengths, DistFormers);
     if (DistLengths!=nullptr) free(DistLengths);
     if (DistFormers!=nullptr) free(DistFormers);
 }
 
 int main(int argc, const char* argv[])
 {
+    string RunString="";
+	for (int i=1;i<argc;++i) RunString+=string(" ")+argv[i];
+	size_t Hash=hash<string>()(RunString);
+	stringstream ss;
+	ss<<std::hex<<Hash;
+	ss>>RunHash;
     int ThreadN=1;
     double Depth=1;
     int Seed=0;
     string DistFileName="";
+    string BasesString="";
+    double ErrorRate=0.15;
 	OptHelper OH=OptHelper("lrsim [Options] fa [fa2] [fa3] ...");
     OH.addOpt('t', "threads", 1, "Number", "Number of threads.",'i',&(ThreadN));
     OH.addOpt('d', "depth", 1, "Number", "Sequencing depth.",'F',&(Depth));
     OH.addOpt('s', "seed", 1, "Number", "Random seed.",'i',&(Seed));
     OH.addOpt('f', "distfile", 1, "FileName", "Distribution binary file generated by extractDistData.py.", 'S', &DistFileName);
+    OH.addOpt('b', "bases", 1, "Number", "Number of bases to be simulated, will omit -d. Format: 500, 500K, 500M, 5.1G (1K=1000).",'S',&(BasesString));
+    OH.addOpt('e', "error", 1, "Number", "Error rate.",'F',&(ErrorRate));
+    OH.addOpt('r', "rfvariance", 1, "Number", "Region error rate float variance.",'F',&(RegionFloatVariance));
+    OH.addOpt(0, "regionsize", 1, "Number", "Region size for error rate floating.",'i',&(RegionSize));
     OH.getOpts(argc,argv);
     mt19937 Generator;
     Generator.seed(Seed);
     if (OH.Args.size()<=0) {OH.showhelp(); return 1;}
-    fprintf(stderr, "Generating simulated long reads for %s... at depth %.2lf. Seed: %d.\n", OH.Args[0], Depth, Seed);
-    sim(OH.Args, Depth, DistFileName, Generator, ThreadN);
+    fprintf(stderr, "Generating simulated long reads for");
+    for (int i=0;i<OH.Args.size();++i) fprintf(stderr, " %s", OH.Args[i]);
+    if (BasesString!="") fprintf(stderr, " of total %s of bases.", BasesString.c_str());
+    else fprintf(stderr, " at depth %.2lf.", Depth);
+    fprintf(stderr," Error rate: %lf. Seed: %d.\n", ErrorRate, Seed);
+    sim(OH.Args, ErrorRate, Depth, BasesString, DistFileName, Generator, ThreadN);
     return 0;
 }
