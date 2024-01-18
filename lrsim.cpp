@@ -23,7 +23,7 @@ pthread_mutex_t m_Output;
 
 htsThreadPool p = {NULL, 0};
 
-string simRead(string & RefSeq, double ErrorRate, int Start, int Length, int Min, int Max, vector<double> & RefRegionErrorFloat, mt19937 & Generator)
+string simRead(const string & RefSeq, double ErrorRate, int Start, int Length, int Min, int Max, const vector<double> & RefRegionErrorFloat, mt19937 & Generator)
 {
     int Ins=22, Del=49, Sub=0;
     if (ReadFloatVariance!=0.0)
@@ -86,7 +86,7 @@ void outputReads(int SN, vector<string> & Reads, string & Quals)
     }
 }
 
-int getRefInd(vector<unsigned long long> & RefAccL, unsigned long long &Position)
+int getRefInd(const vector<unsigned long long> & RefAccL, unsigned long long &Position)
 {
     for (int i=0;i<RefAccL.size();++i)
     {
@@ -113,7 +113,7 @@ struct RunSimArgs
     unsigned * DistFormers;
 };
 
-void runSim(vector<string> & Ref, vector<string> & RefNames, unsigned long long TotalLength, vector<unsigned long long> & RefAccL, double ErrorRate, unsigned long long NumberOfBases, vector<vector<double>> &RegionErrorFloat, int ThisSeed, int DSize=0, unsigned * DistLengths=nullptr, unsigned * DistFormers=nullptr)
+void runSim(const vector<string> & Ref, vector<string> & RefNames, unsigned long long TotalLength, const vector<unsigned long long> & RefAccL, double ErrorRate, unsigned long long NumberOfBases, const vector<vector<double>> &RegionErrorFloat, int ThisSeed, int DSize=0, unsigned * DistLengths=nullptr, unsigned * DistFormers=nullptr)
 {
     double Mean=8000;
     double Variance=7000;
@@ -158,19 +158,19 @@ void runSim(vector<string> & Ref, vector<string> & RefNames, unsigned long long 
             {
                 outputReads(SN,Reads,Quals);
                 Reads.clear();
-                pthread_mutex_unlock(&m_Output);
             }
         }
         else
         {
             if (Reads.size()>1000)
             {
-                if (pthread_mutex_trylock(&m_Output)==0)
-                {
-                    outputReads(SN,Reads,Quals);
-                    Reads.clear();
-                    pthread_mutex_unlock(&m_Output);
-                }
+                // if (pthread_mutex_trylock(&m_Output)==0)
+                // {
+                pthread_mutex_lock(&m_Output);
+                outputReads(SN,Reads,Quals);
+                pthread_mutex_unlock(&m_Output);
+                Reads.clear();
+                // }
             }
         }
     }
@@ -264,7 +264,7 @@ void sim(vector<const char *> &RefFileNames, double ErrorRate, double Depth, str
 		p.qsize=ThreadN*2;
         hts_tpool_process *RunProcess=hts_tpool_process_init(p.pool,p.qsize,1);
 		pthread_mutex_init(&m_Output,NULL);
-        int EachBases=NBases/p.qsize;
+        unsigned long long EachBases=NBases/p.qsize;
         vector<mt19937> Generators;
         for (int i=0;i<p.qsize;++i)
         {
@@ -284,6 +284,7 @@ void sim(vector<const char *> &RefFileNames, double ErrorRate, double Depth, str
 int main(int argc, const char* argv[])
 {
     string RunString="";
+    const char * const Version="v0.3.1";
 	for (int i=1;i<argc;++i) RunString+=string(" ")+argv[i];
 	size_t Hash=hash<string>()(RunString);
 	stringstream ss;
@@ -306,6 +307,7 @@ int main(int argc, const char* argv[])
     OH.addOpt(0, "regionsize", 1, "Number", "Region size for error rate floating.",'i',&(RegionSize));
     OH.getOpts(argc,argv);
     if (OH.Args.size()<=0) {OH.showhelp(); return 1;}
+    fprintf(stderr, "lrsim %s\n",Version);
     fprintf(stderr, "Generating simulated long reads for");
     for (int i=0;i<OH.Args.size();++i) fprintf(stderr, " %s", OH.Args[i]);
     if (BasesString!="") fprintf(stderr, " of total %s of bases.", BasesString.c_str());
