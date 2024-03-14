@@ -14,9 +14,14 @@ int RegionSize=300;
 double RegionFloatVariance=0.0;
 int BlockSize=100;
 double BlockFloatVariance=0.05;
+double BlockFloatVarianceRatio=0.5;
 double ReadFloatVariance=0.05;
-double MaximumError=0.4;
+double ReadFloatVarianceRatio=0.5;
+double MaxError=0.4;
+double MaxErrorRatio=4.0;
 double MinError=0.01;
+double MinErrorRatio=0.1;
+bool NoLengthFloat=false;
 string RunHash="";
 int ThreadN;
 int Ins=22, Del=49, Sub=0;
@@ -51,7 +56,7 @@ string simRead(const string & RefSeq, double ErrorRate, int Start, int Length, i
             BlockI=(i-Start)/BlockSize;
             BlockFloat=BlockFloatDist(Generator);
         }
-        if (ErrorDist(Generator)<max(min(MaximumError,ErrorRate+RefRegionErrorFloat[i/RegionSize]+BlockFloat),MinError))
+        if (ErrorDist(Generator)<max(min(MaxError,ErrorRate+RefRegionErrorFloat[i/RegionSize]+BlockFloat),MinError))
         {
             int TypeI=TypeDist(Generator);
             if (TypeI<InsT)
@@ -143,9 +148,12 @@ void runSim(const vector<string> & Ref, vector<string> & RefNames, unsigned long
             Former=DistFormers[LengthI];
             uniform_int_distribution<unsigned> LDist(Former, Length);
             Length=LDist(Generator);
-            normal_distribution<double> LVariance(1,0.015);
-            double LV=LVariance(Generator);
-            Length=int (((double)Length)*LV);
+            if (!NoLengthFloat)
+            {
+                normal_distribution<double> LVariance(1,0.015);
+                double LV=LVariance(Generator);
+                Length=int (((double)Length)*LV);
+            }
         }
         string Read=simRead(Ref[RefIndex], ErrorRate, Pos, Length, Min, Max, RegionErrorFloat[RefIndex], Generator);
         if (Read.length()==0) continue;
@@ -302,7 +310,7 @@ void sim(vector<const char *> &RefFileNames, double ErrorRate, double Depth, str
 int main(int argc, const char* argv[])
 {
     string RunString="";
-    const char * const Version="v0.4";
+    const char * const Version="v0.5";
 	for (int i=1;i<argc;++i) RunString+=string(" ")+argv[i];
 	size_t Hash=hash<string>()(RunString);
 	stringstream ss;
@@ -316,6 +324,7 @@ int main(int argc, const char* argv[])
     string BasesString="";
     double ErrorRate=0.15;
     string IERatio="22:49:0";
+    bool ShowVersion=false;
 	OptHelper OH=OptHelper("lrsim [Options] fa [fa2] [fa3] ...");
     OH.addOpt('t', "threads", 1, "Number", "Number of threads (different threadn will result in different results).",'i',&(ThreadN));
     OH.addOpt('d', "depth", 1, "Number", "Sequencing depth.",'F',&(Depth));
@@ -330,7 +339,10 @@ int main(int argc, const char* argv[])
     OH.addOpt(0, "rfvariance", 1, "Number", "Region error rate float variance.",'F',&(RegionFloatVariance));
     OH.addOpt(0, "regionsize", 1, "Number", "Region size for error rate floating.",'i',&(RegionSize));
     OH.addOpt(0, "eratio", 1, "INS:DEL:SUB", "Indel error ratio. Substitutions could be seen as Ins+Del. -m will override the INS (with 100) and DEL but not the SUB",'S',&(IERatio));
+    OH.addOpt(0, "nolenghfloat", 0, "", "Do not randomly float the read length, recommended for CCS simulation.",'b',&(NoLengthFloat));
+    OH.addOpt(0, "version", 0, "", "Show version and exit.",'b',&(ShowVersion));
     OH.getOpts(argc,argv);
+    if (ShowVersion) {fprintf(stderr, "lrsim %s\nBy CRE\n", Version);return 0;}
     if (OH.Args.size()<=0) {OH.showhelp(); return 1;}
     fprintf(stderr, "lrsim %s\n",Version);
     fprintf(stderr, "Generating simulated long reads for");
@@ -355,6 +367,10 @@ int main(int argc, const char* argv[])
     for (int i=0;i<OH.Args.size();++i) fprintf(stderr, " %s", OH.Args[i]);
     if (BasesString!="") fprintf(stderr, " of total %s of bases.", BasesString.c_str());
     else fprintf(stderr, " at depth %.2lf.", Depth);
+    MinError=ErrorRate*MinErrorRatio;
+    MaxError=ErrorRate*MaxErrorRatio;
+    BlockFloatVariance=BlockFloatVarianceRatio*ErrorRate;
+    ReadFloatVariance=ReadFloatVarianceRatio*ErrorRate;
     fprintf(stderr," Error rate: %lf. Seed: %d.\n", ErrorRate, Seed);
     sim(OH.Args, ErrorRate, Depth, BasesString, ModelFileName, DistFileName, Seed, ThreadN);
     fprintf(stderr,"Done reads simulation for");
