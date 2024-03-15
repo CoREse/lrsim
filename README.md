@@ -5,9 +5,16 @@ lrsim is an authentic long-read simulator, it can simulate error-prone long-read
 Furthermore, lrsim is ultrafast, can generate 30x whole-genome long reads within minutes (usually limited by your IO speed) utilizing 32 CPU cores (comparing to days that badread demands, even with the multi-processing optimized VISOR version).
 
 ## Compiling and installation
+You should first clone or download the source, and then enter the source directory.
+
+Subsequently:
 ```shell script
+git submodule update --init --recursive
 make
+#Install to system default location
 make install
+#Or if you want to install it to location you specify (will install lrsim to /PATH/TO/YOUR/LOCAL/bin):
+PREFIX=/PATH/TO/YOUR/LOCAL make install
 ```
 
 ## Usage
