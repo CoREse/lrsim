@@ -21,7 +21,10 @@ double MaxError=0.4;
 double MaxErrorRatio=4.0;
 double MinError=0.01;
 double MinErrorRatio=0.1;
+double LengthFloatStd=0.015;
 bool NoLengthFloat=false;
+int FixedReadLength=0;
+bool TailingN=false;
 string RunHash="";
 int ThreadN;
 int Ins=22, Del=49, Sub=0;
@@ -29,7 +32,7 @@ pthread_mutex_t m_Output;
 
 htsThreadPool p = {NULL, 0};
 
-string simRead(const string & RefSeq, double ErrorRate, int Start, int Length, int Min, int Max, const vector<double> & RefRegionErrorFloat, mt19937 & Generator)
+string simRead(const string & RefSeq, double ErrorRate, int Start, int Length, int Min, int Max, const vector<double> & RefRegionErrorFloat, int QueueN, mt19937 & Generator)
 {
     if (ReadFloatVariance!=0.0)
     {
@@ -41,8 +44,7 @@ string simRead(const string & RefSeq, double ErrorRate, int Start, int Length, i
     int DelT=Ins+Del;
     string Read="";
     int i=Start;
-    int End=Start+Length;
-    if (End>RefSeq.length()) End=RefSeq.length();
+    int End=RefSeq.length();
     uniform_int_distribution<int> BaseDist(0,3);
     uniform_int_distribution<int> TypeDist(0,All-1);
     uniform_real_distribution<double> ErrorDist;
@@ -74,19 +76,24 @@ string simRead(const string & RefSeq, double ErrorRate, int Start, int Length, i
         {
             Read+=RefSeq[i];
         }
+        if (Read.length()>=Length) break;
         ++i;
+    }
+    if (TailingN && Read.length()<Length)
+    {
+        for (int i=Read.length();i<Length;++i) Read+='N';
     }
     if (Read.length()<Min) Read="";
     if (Read.length()>Max) Read=Read.substr(0,Max);
     return Read;
 }
 
-void outputReads(int SN, vector<string> & Reads, string & Quals)
+void outputReads(int QueueN, int SN, vector<string> & Reads, string & Quals)
 {
     int i=SN-Reads.size();
     for (int j=0;j<Reads.size();++j)
     {
-        fprintf(stdout, "@Simulated_%s_%d\n%s\n+\n%s\n",RunHash.c_str(),i,Reads[j].c_str(),Quals.substr(0,Reads[j].length()).c_str());
+        fprintf(stdout, "@Simulated_%s_%d_%d\n%s\n+\n%s\n",RunHash.c_str(), QueueN,i,Reads[j].c_str(),Quals.substr(0,Reads[j].length()).c_str());
         ++i;
     }
 }
@@ -113,12 +120,13 @@ struct RunSimArgs
     unsigned long long NumberOfBases;
     vector<vector<double>> *pRegionErrorFloat;
     int ThisSeed;
+    int QueueN;
     int DSize;
     unsigned * DistLengths;
     unsigned * DistFormers;
 };
 
-void runSim(const vector<string> & Ref, vector<string> & RefNames, unsigned long long TotalLength, const vector<unsigned long long> & RefAccL, double ErrorRate, unsigned long long NumberOfBases, const vector<vector<double>> &RegionErrorFloat, int ThisSeed, int DSize=0, unsigned * DistLengths=nullptr, unsigned * DistFormers=nullptr)
+void runSim(const vector<string> & Ref, vector<string> & RefNames, unsigned long long TotalLength, const vector<unsigned long long> & RefAccL, double ErrorRate, unsigned long long NumberOfBases, const vector<vector<double>> &RegionErrorFloat, int Seed, int QueueN, int DSize=0, unsigned * DistLengths=nullptr, unsigned * DistFormers=nullptr)
 {
     double Mean=8000;
     double Variance=7000;
@@ -130,7 +138,7 @@ void runSim(const vector<string> & Ref, vector<string> & RefNames, unsigned long
     int SN=0;
     vector<string> Reads;
     mt19937 Generator;
-    Generator.seed(ThisSeed);
+    Generator.seed(Seed+QueueN);
     normal_distribution<double> LenDist(Mean,Variance);
     uniform_int_distribution<unsigned> LenDDist(0, DSize==0?0:DSize-1);
     uniform_int_distribution<unsigned long long> PosDist(0,TotalLength-1);
@@ -140,22 +148,35 @@ void runSim(const vector<string> & Ref, vector<string> & RefNames, unsigned long
         int RefIndex=getRefInd(RefAccL,Pos);
         int Length=0;
         int Former=0;
-        if (DSize==0) Length=LenDist(Generator);
-        else
+        if (FixedReadLength!=0)
         {
-            unsigned LengthI=LenDDist(Generator);
-            Length=DistLengths[LengthI];
-            Former=DistFormers[LengthI];
-            uniform_int_distribution<unsigned> LDist(Former, Length);
-            Length=LDist(Generator);
+            Length=FixedReadLength;
             if (!NoLengthFloat)
             {
-                normal_distribution<double> LVariance(1,0.015);
+                normal_distribution<double> LVariance(1,LengthFloatStd);
                 double LV=LVariance(Generator);
                 Length=int (((double)Length)*LV);
             }
         }
-        string Read=simRead(Ref[RefIndex], ErrorRate, Pos, Length, Min, Max, RegionErrorFloat[RefIndex], Generator);
+        else
+        {
+            if (DSize==0) Length=LenDist(Generator);
+            else
+            {
+                unsigned LengthI=LenDDist(Generator);
+                Length=DistLengths[LengthI];
+                Former=DistFormers[LengthI];
+                uniform_int_distribution<unsigned> LDist(Former, Length);
+                Length=LDist(Generator);
+                if (!NoLengthFloat)
+                {
+                    normal_distribution<double> LVariance(1,LengthFloatStd);
+                    double LV=LVariance(Generator);
+                    Length=int (((double)Length)*LV);
+                }
+            }
+        }
+        string Read=simRead(Ref[RefIndex], ErrorRate, Pos, Length, Min, Max, RegionErrorFloat[RefIndex], QueueN, Generator);
         if (Read.length()==0) continue;
         BN+=Read.length();
         SN+=1;
@@ -164,7 +185,7 @@ void runSim(const vector<string> & Ref, vector<string> & RefNames, unsigned long
         {
             if (Reads.size()>1000)
             {
-                outputReads(SN,Reads,Quals);
+                outputReads(QueueN,SN,Reads,Quals);
                 Reads.clear();
             }
         }
@@ -175,7 +196,7 @@ void runSim(const vector<string> & Ref, vector<string> & RefNames, unsigned long
                 // if (pthread_mutex_trylock(&m_Output)==0)
                 // {
                 pthread_mutex_lock(&m_Output);
-                outputReads(SN,Reads,Quals);
+                outputReads(QueueN,SN,Reads,Quals);
                 pthread_mutex_unlock(&m_Output);
                 Reads.clear();
                 // }
@@ -183,14 +204,14 @@ void runSim(const vector<string> & Ref, vector<string> & RefNames, unsigned long
         }
     }
     pthread_mutex_lock(&m_Output);
-    outputReads(SN,Reads,Quals);
+    outputReads(QueueN,SN,Reads,Quals);
     pthread_mutex_unlock(&m_Output);
 }
 
 void * runSimHandler(void * Args)
 {
     RunSimArgs * pArgs=(RunSimArgs *) Args;
-    runSim(*pArgs->pRef, * pArgs->pRefNames, pArgs->TotalLength, * pArgs->pRefAccL, pArgs->ErrorRate, pArgs->NumberOfBases, *pArgs->pRegionErrorFloat, pArgs->ThisSeed, pArgs->DSize, pArgs-> DistLengths, pArgs->DistFormers);
+    runSim(*pArgs->pRef, * pArgs->pRefNames, pArgs->TotalLength, * pArgs->pRefAccL, pArgs->ErrorRate, pArgs->NumberOfBases, *pArgs->pRegionErrorFloat, pArgs->ThisSeed, pArgs->QueueN, pArgs->DSize, pArgs-> DistLengths, pArgs->DistFormers);
     delete pArgs;
     return NULL;
 }
@@ -279,7 +300,7 @@ void sim(vector<const char *> &RefFileNames, double ErrorRate, double Depth, str
     fprintf(stderr,"Generating reads...Ref length: %llu, TotalBases=%llu\n",TotalLength, NBases);
     if (ThreadN==1)
     {
-        runSim(Ref, RefNames, TotalLength, RefAccL, ErrorRate, NBases, RegionErrorFloat, Seed, DSize, DistLengths, DistFormers);
+        runSim(Ref, RefNames, TotalLength, RefAccL, ErrorRate, NBases, RegionErrorFloat, Seed, 0, DSize, DistLengths, DistFormers);
     }
     else
     {
@@ -297,7 +318,7 @@ void sim(vector<const char *> &RefFileNames, double ErrorRate, double Depth, str
             // Generators.push_back(mt19937());
             // Generators[Generators.size()-1].seed(Seed+i);
             // RunSimArgs *A=new RunSimArgs{&Ref, &RefNames, TotalLength, &RefAccL, ErrorRate, EachBases, &RegionErrorFloat, &(Generators[Generators.size()-1]), DSize, DistLengths, DistFormers};
-            RunSimArgs *A=new RunSimArgs{&Ref, &RefNames, TotalLength, &RefAccL, ErrorRate, EachBases, &RegionErrorFloat, Seed+i, DSize, DistLengths, DistFormers};
+            RunSimArgs *A=new RunSimArgs{&Ref, &RefNames, TotalLength, &RefAccL, ErrorRate, EachBases, &RegionErrorFloat, Seed, i, DSize, DistLengths, DistFormers};
             hts_tpool_dispatch(p.pool,RunProcess,runSimHandler,(void *)A);
         }
         hts_tpool_process_flush(RunProcess);
@@ -310,7 +331,7 @@ void sim(vector<const char *> &RefFileNames, double ErrorRate, double Depth, str
 int main(int argc, const char* argv[])
 {
     string RunString="";
-    const char * const Version="v0.5.1";
+    const char * const Version="v0.6";
 	for (int i=1;i<argc;++i) RunString+=string(" ")+argv[i];
 	size_t Hash=hash<string>()(RunString);
 	stringstream ss;
@@ -339,7 +360,10 @@ int main(int argc, const char* argv[])
     OH.addOpt(0, "rfvarianceratio", 1, "Number", "Multiplies errorrate to form region error rate float variance.",'F',&(RegionFloatVariance));
     OH.addOpt(0, "regionsize", 1, "Number", "Region size for error rate floating.",'i',&(RegionSize));
     OH.addOpt(0, "eratio", 1, "INS:DEL:SUB", "Indel error ratio. Substitutions could be seen as Ins+Del. -m will override the INS (with 100) and DEL but not the SUB",'S',&(IERatio));
-    OH.addOpt(0, "nolenghfloat", 0, "", "Do not randomly float the read length, recommended for CCS simulation.",'b',&(NoLengthFloat));
+    OH.addOpt(0, "lengthfloatratio", 1, "Number", "Ratio std for read length float.",'F',&(LengthFloatStd));
+    OH.addOpt(0, "fixedreadlength", 1, "Length", "Specify a fixed read length, if not 0, will omit length distribution but will still be influenced by length float, along with --nolengthfloat --tailingn to get absolutely fixed read length.",'i',&(FixedReadLength));
+    OH.addOpt(0, "nolengthfloat", 0, "", "Do not randomly float the read length.",'b',&(NoLengthFloat));
+    OH.addOpt(0, "tailingn", 0, "", "Padding the read with N at the tail if the read reaches the end of the chromosome (useful if you want absolute fixed length reads)",'b',&(TailingN));
     OH.addOpt(0, "version", 0, "", "Show version and exit.",'b',&(ShowVersion));
     OH.getOpts(argc,argv);
     if (ShowVersion) {fprintf(stderr, "lrsim %s\nBy CRE\n", Version);return 0;}
